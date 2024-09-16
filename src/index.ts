@@ -7,7 +7,7 @@ dotenv.config();
 
 import knex from "../database/connection";
 
-const PAGES = 55;
+const PAGES = 57;
 const axiosClient = axios.create({
   httpAgent: new http.Agent({ keepAlive: true }),
 });
@@ -54,36 +54,41 @@ async function* getAllFoods(): AsyncGenerator<Food> {
     const { data } = await axiosClient.get(TARGET_URL, {
       params: { pagina: page.toString() },
     });
-
+    
     const $ = cheerio.load(data);
-    const tds = $(".table tbody tr")
-      .children()
-      .toArray()
-      .map((td) => $(td).text());
+    const rows = $(".table tbody tr").toArray(); // Pega todas as linhas da tabela
 
-    const NUMBER_OF_FIELDS = 6;
+    for (const row of rows) {
+      const tds = $(row).find("td").toArray(); // Pega todas as células da linha
+      const [codeTd, portugueseNameTd, nameTd, cientificNameTd, groupTd, brandTd] = tds;
 
-    for (const valor in tds) {
-      const valueInt = parseInt(valor);
+      const code = $(codeTd).text().trim();               // Código do produto
+      const portugueseName = $(portugueseNameTd).text().trim(); // Nome em português
+      const name = $(nameTd).text().trim() || '';          // Nome comum (pode ser vazio)
+      const cientificName = $(cientificNameTd).text().trim() || ''; // Nome científico (pode ser vazio)
+      const group = $(groupTd).text().trim() || '';        // Grupo de alimentos
+      const brand = $(brandTd).text().trim() || '';        // Marca (pode ser vazio)
 
-      if (valueInt % NUMBER_OF_FIELDS === 0) {
-        const [code, portugueseName, name, cientificName, group, brand] =
-          tds.slice(valueInt, valueInt + NUMBER_OF_FIELDS);
+      // Garante que todos os valores estão atribuídos corretamente
+      const food: Food = {
+        code,
+        portugueseName,
+        name,
+        cientificName,
+        group,
+        brand,
+        // nutrients,
+      };
 
-        //const nutrients = await getNutrients(code);
-        yield {
-          code,
-          portugueseName,
-          name,
-          cientificName,
-          group,
-          brand,
-          //nutrients,
-        };
-      }
+      // Log do objeto Food antes de ser retornado
+      console.log('Created Food object:', food);
+
+      yield food;
     }
+
   }
 }
+
 
 async function* getNutrients(code: string): AsyncGenerator<Nutrients> {
   const TARGET_URL = `http://www.tbca.net.br/base-dados/int_composicao_estatistica.php`;
@@ -91,15 +96,22 @@ async function* getNutrients(code: string): AsyncGenerator<Nutrients> {
     params: { cod_produto: code },
   });
 
+  // Log dos dados brutos
+  console.log(`Fetched data for code ${code}:`, data);
+
   const $ = cheerio.load(data);
   const tds = $("#tabela1 tbody tr")
     .children()
     .toArray()
     .map((td) => $(td).text());
 
+  // Log dos dados extraídos
+  console.log('Extracted table data:', tds);
+
+  const NUMBER_OF_FIELDS = 9;
+
   for (const index in tds) {
     const valueInt = parseInt(index);
-    const NUMBER_OF_FIELDS = 9;
 
     if (valueInt % NUMBER_OF_FIELDS === 0) {
       const [
@@ -114,7 +126,7 @@ async function* getNutrients(code: string): AsyncGenerator<Nutrients> {
         typeOfData,
       ] = tds.slice(valueInt, valueInt + NUMBER_OF_FIELDS);
 
-      yield {
+      const nutrient: Nutrients = {
         component,
         unity,
         value,
@@ -125,9 +137,15 @@ async function* getNutrients(code: string): AsyncGenerator<Nutrients> {
         references,
         typeOfData,
       };
+
+      // Log do objeto Nutrients antes de ser retornado
+      console.log('Created Nutrients object:', nutrient);
+
+      yield nutrient;
     }
   }
 }
+
 
 async function getFoodsAndInsertInDB() {
   for await (const food of getAllFoods()) {
@@ -144,7 +162,9 @@ async function getFoodsAndInsertInDB() {
     const [insertedId] = await knex("foods").insert(foodToInsert);
 
     console.log(`food with ID: ${insertedId} has been created`);
+      //console.log(food)
   }
+
 }
 
 async function getNutrientsAndInsertInDB() {
@@ -154,22 +174,33 @@ async function getNutrientsAndInsertInDB() {
     for await (const nutrient of getNutrients(code)) {
       const nutrientToInsert: NutrientsDB = {
         food_code: code,
-        ...nutrient,
-        max_value: nutrient.maxValue,
-        min_value: nutrient.minValue,
-        number_of_data: nutrient.numberOfData,
-        standard_deviation: nutrient.standardDeviation,
+        component: nutrient.component,
+        unity: nutrient.unity,
+        value: parseFloat(nutrient.value.replace(',', '.')) || 0, // Convertendo para número, substituindo ',' por '.' e tratando NaN
+        standard_deviation: nutrient.standardDeviation === '-' ? '0' : nutrient.standardDeviation,
+        min_value: parseFloat(nutrient.minValue.replace(',', '.')) || 0, // Convertendo para número, substituindo ',' por '.' e tratando NaN
+        max_value: parseFloat(nutrient.maxValue.replace(',', '.')) || 0, // Convertendo para número, substituindo ',' por '.' e tratando NaN
+        number_of_data: parseInt(nutrient.numberOfData, 10) || 0, // Convertendo para número e tratando NaN
+        references: nutrient.references === '-' ? '0' : nutrient.references,
         type_of_data: nutrient.typeOfData,
       };
+      
+      // Log do objeto NutrientsDB antes de inserir
+      console.log('Nutrient to insert:', nutrientToInsert);
 
-      const [insertedId] = await knex("nutrients").insert(nutrientToInsert);
+      try {
+        const [insertedId] = await knex("nutrients").insert(nutrientToInsert);
 
-      console.log(
-        `nutrient with ID: ${insertedId} from food with CODE: ${code} has been created`
-      );
+        console.log(
+          `Nutrient with ID: ${insertedId} from food with CODE: ${code} has been created`
+        );
+      } catch (error) {
+        console.error('Error inserting nutrient:', error);
+      }
     }
   }
 }
 
-//getFoodsAndInsertInDB();
+
+getFoodsAndInsertInDB();
 getNutrientsAndInsertInDB();
